@@ -1,0 +1,10 @@
+﻿flutter : [!] Your app is using an unsupported Gradle project. To fix this problem, create a new 
+project by running `flutter create -t app <app-directory>` and then move the dart code, assets and 
+pubspec.yaml to the new project.
+At line:1 char:1
++ flutter build apk --release > flutter_build.txt 2>&1
++ ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: ([!] Your app is...he new project.:String) [], RemoteEx 
+   ception
+    + FullyQualifiedErrorId : NativeCommandError
+ 

@@ -1,0 +1,35 @@
+﻿go : main.go:10:2: no 
+required module provides 
+package 
+github.com/gin-gonic/gin; 
+to add it:
+At line:1 char:39
++ flutter analyze > 
+flutter_errors.txt; go 
+build > go_errors.txt 2>&1
++                           
+            ~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~
+    + CategoryInfo          
+    : NotSpecified: (main.  
+  go:10:2: n...gin; to ad   
+ d it::String) [], Remot    
+eException
+    + FullyQualifiedErrorId 
+    : NativeCommandError
+ 
+	go get 
+github.com/gin-gonic/gin
+db\db.go:8:2: no required 
+module provides package 
+modernc.org/sqlite; to add 
+it:
+	go get modernc.org/sqlite
+main.go:6:2: package 
+savetune/downloader is not 
+in std (C:\Program Files\Go\
+src\savetune\downloader)
+main.go:7:2: package 
+savetune/handlers is not in 
+std (C:\Program Files\Go\src
+\savetune\handlers)

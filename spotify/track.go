@@ -1,0 +1,2 @@
+package spotify
+func GetTrackCDN() {}

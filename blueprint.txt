@@ -1,0 +1,574 @@
+🎵  SaveTune Mobile
+Flutter + Go · Production Development Blueprint
+High-Fidelity FLAC Streaming & Offline Download — No Login Required
+1. Roles & Context
+1.1 Target Users
+SaveTune Mobile is built for audiophiles, music enthusiasts, and power users who want true high-fidelity audio on Android — specifically those who already have a Spotify account and can supply their sp_dc session cookie. No OAuth flow, no app registration hurdles.
+1.2 Core Problem
+Official Spotify & streaming apps do not expose true lossless FLAC downloads to users.
+Premium subscription paywalls block high-res audio on mobile.
+Existing tools are desktop-only (like the Wails-based SaveTune desktop app).
+Users want offline-first playback with synchronized lyrics, waveforms, and a polished dark-mode UI on Android.
+1.3 Unique Constraint — No OAuth / No Login
+The app does NOT use Spotify OAuth or any third-party login screen. Instead:
+Users paste their sp_dc cookie (extracted from browser devtools) into the app's Settings screen.
+The Go backend uses this cookie to authenticate requests to Spotify's internal APIs (same mechanism browser clients use).
+This avoids Spotify rate-limiting OAuth apps and allows access to the full metadata + CDN URLs.
+The sp_dc key is stored only in Android's EncryptedSharedPreferences — never sent to any external server.
+1.4 Success Metrics
+Metric
+Target
+Search-to-playback latency
+< 2 seconds on WiFi
+FLAC download speed
+>= 80% of available bandwidth
+Offline playback availability
+100% of downloaded tracks
+Lyrics sync accuracy
+±500 ms
+App crash rate
+< 0.5% of sessions
+sp_dc session persistence
+Until Spotify invalidates token
+2. Architecture
+2.1 High-Level Topology
+SaveTune Mobile uses a local-first, embedded architecture: the Go backend runs entirely on the Android device as a background service — no remote server required. The Flutter UI communicates with it via localhost HTTP.
+Architecture Components
+Layer
+Technology
+Role
+Mobile UI
+Flutter 3.22+ / Dart
+Dark-mode SPA: Search, Player, Library, Downloader
+Local API Server
+Go 1.22 + Gin
+HTTP server on 127.0.0.1:7799 embedded in app
+Metadata Engine
+Go + Spotify Internal API
+Resolves tracks, albums, playlists via sp_dc
+Download Engine
+Go + FFmpeg (arm64)
+Fetches CDN streams, muxes to FLAC, writes ID3 tags
+Lyrics Engine
+Go + Spotify Lyrics API
+Fetches timed lyrics, stores in SQLite
+Local Database
+SQLite (go-sqlite3)
+Tracks, playlists, download history, cache
+Secure Storage
+Android EncryptedSharedPreferences
+sp_dc key, app config
+File Storage
+Android /Music/SaveTune/
+Downloaded FLAC files + album art
+2.2 Flutter ↔ Go Communication
+The Flutter app launches the Go binary as a foreground service on app start. All communication is via localhost REST — no IPC complexity, no FFI binding needed. This also lets the Go server handle long-running downloads independently of the Flutter lifecycle.
+Communication Flow
+Flutter UI  ──HTTP GET/POST──►  Go Gin Server (127.0.0.1:7799)
+                                       │
+                    ┌──────────────────┼──────────────────┐
+                    ▼                  ▼                  ▼
+           Spotify Internal API   CDN Audio Stream    SQLite DB
+           (sp_dc cookie auth)   (FLAC/OGG mux)     (local cache)
+2.3 Authentication Design (sp_dc Cookie)
+No traditional auth flow. Instead:
+User opens Settings → pastes sp_dc cookie value.
+Flutter POSTs it to Go server: POST /api/config/spdc
+Go validates the cookie by hitting Spotify's token endpoint: GET https://open.spotify.com/get_access_token
+On success, Go stores the sp_dc in Android Keystore via JNI call and caches a short-lived Bearer token in memory.
+All subsequent Spotify API calls use the cached Bearer token, refreshing automatically when it expires.
+2.4 Data Model (SQLite)
+Core Tables
+Table
+Key Columns
+Purpose
+tracks
+id, spotify_id, title, artist, album, duration_ms, file_path, format, bitrate, downloaded_at
+Downloaded track registry
+playlists
+id, name, created_at, cover_url
+User-created playlists
+playlist_tracks
+playlist_id, track_id, position
+Many-to-many join
+lyrics
+spotify_id, lines_json, provider, fetched_at
+Timed lyrics cache
+download_queue
+id, spotify_id, status, progress, error, created_at
+Active download state
+api_cache
+key, value_json, expires_at
+Generic API response cache (1h TTL)
+favorites
+spotify_id, added_at
+Starred tracks
+3. Tech Stack Specifics
+3.1 Flutter Frontend
+Package
+Version
+Purpose
+Flutter SDK
+3.22+
+Core framework (Material 3, Dart 3)
+just_audio
+^0.9.38
+Local FLAC/MP3 playback with gapless
+audio_service
+^0.18.13
+Background playback + lock screen controls
+dio
+^5.4
+HTTP client for Go local API calls
+flutter_secure_storage
+^9.0
+EncryptedSharedPreferences wrapper
+isar / drift
+^3.1 / ^2.17
+Optional local DB for Flutter-side state
+riverpod
+^2.5
+State management (AsyncNotifier pattern)
+go_router
+^14.0
+Declarative routing
+cached_network_image
+^3.3
+Album art with disk cache
+fl_chart
+^0.67
+Waveform / spectrum visualization
+lottie
+^3.1
+Animated loading / playback states
+freezed + json_serializable
+^2.4 / ^6.7
+Immutable models + JSON codegen
+3.2 Go Backend
+Package
+Version
+Purpose
+Go
+1.22+
+Runtime + generics support
+gin-gonic/gin
+v1.10
+HTTP router (fast, middleware-friendly)
+mattn/go-sqlite3
+v1.14
+CGO SQLite driver (compiled for arm64)
+gorilla/websocket
+v1.5
+Real-time download progress push
+go-flac
+v1.0
+FLAC metadata embedding (ID3/Vorbis)
+google/uuid
+v1.6
+Download job IDs
+spf13/viper
+v1.18
+Config management
+3.3 FFmpeg on Android
+The app bundles a pre-compiled FFmpeg static binary for arm64-v8a (and optionally x86_64 for emulators). At first launch, the Go service extracts the binary to the app's private files directory and sets executable permissions. The Go download engine spawns FFmpeg as a subprocess for all audio transcoding.
+Binary source: ffmpeg-kit-android (GPL build for FLAC support).
+Size: ~15 MB (stripped, UPX-compressed).
+Placed at: /data/data/com.savetune.app/files/ffmpeg
+3.4 CI/CD
+Stage
+Tool
+Detail
+Go Build (arm64)
+GitHub Actions + Docker (golang:1.22-bullseye)
+Cross-compile: GOOS=android GOARCH=arm64 CGO_ENABLED=1
+Flutter Build
+GitHub Actions + Flutter 3.22
+flutter build apk --release --split-per-abi
+Code Quality
+golangci-lint + flutter analyze
+Linting on every PR
+Testing
+go test + flutter test
+Unit + widget tests
+Distribution
+Firebase App Distribution
+Beta APK delivery to testers
+Release
+GitHub Releases
+Signed APK + changelog
+4. MVP Feature Scope
+4.1 MVP (Phase 1) Features
+Feature
+Scope
+Priority
+sp_dc Cookie Input & Validation
+Settings screen; validate token on save
+P0 — Must Have
+Spotify Search (Tracks / Albums / Playlists)
+Query via internal search API; show rich results
+P0 — Must Have
+Single Track Download (FLAC)
+Go: fetch CDN → FFmpeg mux → write FLAC + ID3
+P0 — Must Have
+Download Progress UI
+Real-time progress bar via WebSocket/polling
+P0 — Must Have
+Local Library Screen
+List downloaded FLAC files from SQLite
+P0 — Must Have
+Full Audio Playback (FLAC)
+just_audio + audio_service for background play
+P0 — Must Have
+Track Metadata Display
+Title, artist, album, cover art on player screen
+P0 — Must Have
+Offline Playback
+100% offline from local FLAC file path
+P0 — Must Have
+Basic Queue Management
+Next/Prev/Shuffle controls
+P1 — Should Have
+Lyrics Display
+Fetch + display timed lyrics; auto-scroll
+P1 — Should Have
+Playlist Batch Download
+Queue all tracks in a Spotify playlist
+P1 — Should Have
+Favorites / Like
+Star tracks; show in Favorites tab
+P1 — Should Have
+4.2 Offline-First Strategy
+All downloaded tracks stored as local FLAC files — playback is 100% offline.
+SQLite holds the library index; no network required to browse or play.
+Album art is downloaded once and cached on disk alongside the FLAC file.
+Lyrics are stored in SQLite after first fetch.
+Search and metadata fetch require network; graceful error shown when offline.
+Download queue persists across app restarts via the download_queue SQLite table.
+5. API Contracts (Go Gin → Flutter)
+5.1 Base URL
+All endpoints served at: http://127.0.0.1:7799/api/v1
+All responses: Content-Type: application/json
+Error format: { "error": "message", "code": "ERROR_CODE" }
+5.2 Configuration Endpoints
+POST /api/v1/config/spdc — Set sp_dc Cookie
+Request:  { "sp_dc": "AQD3...yourCookieValue..." }
+Response: { "valid": true, "display_name": "John", "country": "US" }
+Error:    { "error": "Invalid sp_dc cookie", "code": "AUTH_FAILED" }
+GET /api/v1/config — Get Current Config
+Response: { "sp_dc_set": true, "download_dir": "/Music/SaveTune", "format": "flac" }
+5.3 Search Endpoints
+GET /api/v1/search?q={query}&type={track|album|playlist}&limit=20&offset=0
+Response: {
+  "tracks": [{ "id": "4iV5...", "title": "Blinding Lights",
+               "artist": "The Weeknd", "album": "After Hours",
+               "duration_ms": 200040, "cover_url": "https://i.scdn.co/..." }],
+  "total": 248, "offset": 0, "limit": 20
+}
+GET /api/v1/album/{spotify_album_id}
+Response: { "id": "...", "name": "...", "artist": "...", "tracks": [...], "cover_url": "..." }
+GET /api/v1/playlist/{spotify_playlist_id}
+Response: { "id": "...", "name": "...", "owner": "...", "tracks": [...], "cover_url": "..." }
+5.4 Download Endpoints
+POST /api/v1/download — Queue a Track
+Request:  { "spotify_id": "4iV5W...", "format": "flac" }
+Response: { "job_id": "uuid-here", "status": "queued" }
+GET /api/v1/download/{job_id} — Get Download Status
+Response: { "job_id": "...", "status": "downloading|complete|error",
+            "progress": 67.4, "speed_kbps": 2048,
+            "file_path": "/Music/SaveTune/The_Weeknd-Blinding_Lights.flac" }
+GET /api/v1/downloads — List All Jobs
+Response: { "jobs": [...], "active_count": 2 }
+WebSocket: ws://127.0.0.1:7799/ws/downloads — Real-time Progress
+Server pushes: { "job_id": "...", "progress": 72.1, "status": "downloading" }
+5.5 Library Endpoints
+GET /api/v1/library?sort=title&order=asc&offset=0&limit=50
+Response: { "tracks": [{ "id": 1, "spotify_id": "...", "title": "...",
+                         "artist": "...", "file_path": "...",
+                         "format": "flac", "bitrate": 1411 }],
+            "total": 143 }
+GET /api/v1/library/track/{id} — Single Track Detail
+DELETE /api/v1/library/track/{id} — Remove from Library + Disk
+5.6 Lyrics Endpoint
+GET /api/v1/lyrics/{spotify_id}
+Response: { "lines": [{ "start_time_ms": 14720, "text": "I said, ooh, Im blinded by the lights" }, ...] }
+6. Data Flow & Security
+6.1 Download Data Flow
+Flutter sends POST /api/v1/download with { spotify_id, format }.
+Go validates sp_dc token is still valid (refresh if needed).
+Go calls Spotify internal track endpoint to get CDN stream URL (authenticated with Bearer token derived from sp_dc).
+Go launches goroutine: streams CDN audio → pipes through FFmpeg → writes FLAC to /Music/SaveTune/Artist-Title.flac.
+FFmpeg embeds metadata: title, artist, album, year, cover art (downloaded separately), track number.
+Progress events pushed via WebSocket every 500 ms.
+On completion, Go inserts track record into SQLite tracks table.
+Flutter receives WebSocket "complete" event, refreshes library screen.
+6.2 Input Validation & Sanitization
+Go backend: all search query strings are URL-encoded before forwarding to Spotify.
+spotify_id parameters are validated against regex ^[a-zA-Z0-9]{22}$ before any API calls.
+Filename sanitization: sanitizeFilename() strips / \ : * ? " < > | and limits to 200 chars.
+sp_dc cookie: validated by actually calling Spotify's token endpoint — no regex trust.
+FFmpeg subprocess: all arguments passed as []string (never shell-interpolated) to exec.Command.
+6.3 Secure Storage on Device
+Data
+Storage
+Encryption
+sp_dc cookie
+Android EncryptedSharedPreferences
+AES-256-GCM via Android Keystore
+Bearer token (cached)
+Go in-memory only (never persisted)
+N/A — cleared on restart
+FLAC files
+Public /Music/SaveTune/
+None (user's music files)
+SQLite DB
+App private storage (/data/data/.../databases/)
+Android full-disk encryption
+Album art cache
+App cache dir (/data/data/.../cache/artwork/)
+Android full-disk encryption
+6.4 Network Security
+All external calls (Spotify APIs) are HTTPS only — TLS verified.
+Local Go server only binds to 127.0.0.1 (loopback) — not accessible on the network.
+No analytics, no telemetry, no external logging. Fully local operation.
+Go uses x/net/http2 transport with proper TLS min version set to TLS 1.2.
+7. Development Plan & Milestones
+Phase 1 — Foundation (Weeks 1–3)
+Task
+Owner
+Days
+Set up Flutter project structure + Riverpod + go_router
+Frontend
+2
+Set up Go Gin server project + SQLite schema migration
+Backend
+2
+Android service: launch Go binary on app start, auto-restart
+Backend
+3
+Bundle FFmpeg arm64 binary, extraction on first launch
+Backend
+2
+Settings screen: sp_dc input, validation call, secure storage
+Full Stack
+3
+Go: Spotify token refresh loop using sp_dc
+Backend
+2
+Flutter HTTP client (dio) to localhost Go API
+Frontend
+1
+Phase 2 — Core Features (Weeks 4–7)
+Task
+Owner
+Days
+Search UI: query bar, track/album/playlist results, rich cards
+Frontend
+4
+Go: Spotify search endpoint handler + caching layer
+Backend
+3
+Single track download: Go goroutine + FFmpeg mux + ID3 embed
+Backend
+4
+WebSocket download progress: Go push, Flutter consume
+Full Stack
+2
+Download queue UI: active jobs, progress bars, cancel button
+Frontend
+3
+Local Library screen: list tracks, sort/filter, search
+Frontend
+3
+Full player UI: cover, controls, scrubber, queue
+Frontend
+4
+just_audio + audio_service integration for FLAC playback
+Frontend
+3
+Phase 3 — Enhancements (Weeks 8–11)
+Task
+Owner
+Days
+Lyrics fetch, storage, synchronized scrolling lyrics view
+Full Stack
+4
+Playlist batch download (queue all tracks in parallel)
+Backend
+3
+Favorites system (star/unstar, favorites tab)
+Full Stack
+2
+Mini player widget persisting across navigation
+Frontend
+2
+Spectrum/waveform visualizer using fl_chart
+Frontend
+3
+Sleep timer, crossfade settings
+Frontend
+2
+Audio converter (transcode FLAC ↔ MP3 via FFmpeg)
+Full Stack
+3
+Lock screen / notification controls (audio_service)
+Frontend
+2
+Phase 4 — Polish & Release (Weeks 12–14)
+Comprehensive error handling: network errors, Spotify 429 rate limits, FFmpeg failures.
+Dark mode polish: Material 3 theming, smooth page transitions with AnimatedSwitcher.
+Performance: lazy loading library lists, image cache eviction, Go memory profiling.
+Testing: Go unit tests for all API handlers; Flutter widget tests for key screens.
+Build pipeline: signed release APK via GitHub Actions.
+Beta distribution: Firebase App Distribution to testers.
+Risk Mitigation
+Risk
+Likelihood
+Mitigation
+Spotify invalidates sp_dc mechanism
+Medium
+Token refresh loop; clear error to user with re-entry prompt
+FFmpeg arm64 binary size / licensing
+Low
+Use ffmpeg-kit-android GPL; strip to needed codecs only (~15 MB)
+Go CGO cross-compile complexity for SQLite
+Medium
+Use modernc.org/sqlite (pure Go, no CGO needed) as fallback
+Android background process killed by OS
+High
+Register Go server as a Foreground Service with notification
+CDN URL expiry during large downloads
+Medium
+Refresh CDN URL if 403 received; retry logic with backoff
+8. Project Structure & Code Skeletons
+8.1 Flutter Project Structure
+savetune_mobile/
+├── android/
+│   ├── app/src/main/
+│   │   ├── GoService.java       # Foreground Service: launches Go binary
+│   │   └── MainActivity.kt      # Extract + start GoService on launch
+│   └── assets/                  # ffmpeg binary bundled here
+├── lib/
+│   ├── main.dart
+│   ├── app/
+│   │   ├── router.dart          # go_router setup
+│   │   └── theme.dart           # Dark mode Material 3 theme
+│   ├── features/
+│   │   ├── search/              # Search screen + providers
+│   │   ├── player/              # Full player + mini player
+│   │   ├── library/             # Library screen + track list
+│   │   ├── downloads/           # Queue UI + progress
+│   │   ├── lyrics/              # Lyrics view + sync
+│   │   └── settings/            # sp_dc entry + config
+│   ├── shared/
+│   │   ├── api/client.dart      # dio client → localhost:7799
+│   │   ├── models/              # freezed data models
+│   │   └── widgets/             # shared UI components
+│   └── services/
+│       ├── audio_service.dart   # just_audio + audio_service
+│       └── websocket.dart       # download progress WS
+8.2 Go Backend Structure
+savetune-go/
+├── main.go                      # Entry point: init DB, start Gin server
+├── handlers/
+│   ├── config.go               # POST /config/spdc, GET /config
+│   ├── search.go               # GET /search
+│   ├── download.go             # POST /download, GET /download/:id
+│   ├── library.go              # GET /library, DELETE /library/:id
+│   ├── lyrics.go               # GET /lyrics/:id
+│   └── websocket.go            # WS /ws/downloads
+├── spotify/
+│   ├── auth.go                 # sp_dc → Bearer token refresh
+│   ├── search.go               # Spotify search GraphQL
+│   ├── track.go                # CDN URL resolver
+│   └── lyrics.go               # Spotify lyrics fetch
+├── downloader/
+│   ├── engine.go               # Concurrent download orchestrator
+│   ├── ffmpeg.go               # FFmpeg subprocess wrapper
+│   └── metadata.go             # ID3/Vorbis tag embedding
+├── db/
+│   ├── db.go                   # SQLite connection + migrations
+│   └── queries.go              # All SQL queries
+└── config/
+    └── config.go               # Viper config management
+8.3 Key Code Skeleton — Go Main
+// main.go
+package main
+import (
+    "github.com/gin-gonic/gin"
+    "savetune/db"
+    "savetune/handlers"
+    "savetune/spotify"
+)
+func main() {
+    database := db.Init("savetune.db")
+    spotifyClient := spotify.NewClient()
+    r := gin.Default()
+    r.Use(corsMiddleware()) // Allow localhost Flutter
+    v1 := r.Group("/api/v1")
+    handlers.RegisterConfig(v1, spotifyClient)
+    handlers.RegisterSearch(v1, spotifyClient)
+    handlers.RegisterDownload(v1, spotifyClient, database)
+    handlers.RegisterLibrary(v1, database)
+    handlers.RegisterLyrics(v1, spotifyClient, database)
+    handlers.RegisterWebSocket(v1)
+    r.Run("127.0.0.1:7799") // Loopback only
+}
+8.4 Key Code Skeleton — Flutter API Client
+// lib/shared/api/client.dart
+class SaveTuneApi {
+  static const _base = "http://127.0.0.1:7799/api/v1";
+  final _dio = Dio(BaseOptions(baseUrl: _base));
+  Future<List<TrackModel>> search(String q) async {
+    final res = await _dio.get("/search", queryParameters: {"q": q});
+    return (res.data["tracks"] as List).map(TrackModel.fromJson).toList();
+  }
+  Future<DownloadJob> queueDownload(String spotifyId) async {
+    final res = await _dio.post("/download", data: {"spotify_id": spotifyId, "format": "flac"});
+    return DownloadJob.fromJson(res.data);
+  }
+}
+8.5 Key Code Skeleton — Go Download Handler
+// handlers/download.go
+func QueueDownload(c *gin.Context) {
+    var req struct { SpotifyID string `json:"spotify_id"` }
+    if err := c.ShouldBindJSON(&req); err != nil { c.JSON(400, gin.H{"error": err.Error()}); return }
+    // Validate spotify_id format
+    if !spotifyIDRegex.MatchString(req.SpotifyID) {
+        c.JSON(400, gin.H{"error": "invalid spotify_id", "code": "INVALID_ID"}); return
+    }
+    jobID := uuid.NewString()
+    go downloader.Start(jobID, req.SpotifyID, spotifyClient, db, progressHub)
+    c.JSON(202, gin.H{"job_id": jobID, "status": "queued"})
+}
+9. Running Locally & Deployment
+9.1 Local Development Setup
+Prerequisites
+Flutter 3.22+ (flutter doctor should pass)
+Go 1.22+ (go version should show 1.22+)
+Android SDK + NDK (for arm64 cross-compile of Go)
+FFmpeg binary for arm64 (download from ffmpeg-kit-android releases)
+Step-by-Step
+Clone repo: git clone https://github.com/yourorg/savetune-mobile
+Build Go backend for Android arm64:
+   cd savetune-go
+   GOOS=android GOARCH=arm64 CGO_ENABLED=0 go build -o ../savetune_mobile/android/app/src/main/assets/savetune-server .
+Place ffmpeg arm64 binary in: android/app/src/main/assets/ffmpeg
+Run Flutter app on connected Android device:
+   cd savetune_mobile && flutter run --release
+On first launch: open Settings, paste your sp_dc cookie, tap Validate.
+Search for a track, tap Download — your FLAC will appear in Library.
+9.2 Building a Release APK
+flutter build apk --release --split-per-abi
+# Output: build/app/outputs/apk/release/app-arm64-v8a-release.apk
+Sign with your keystore using the standard Flutter signing configuration in android/key.properties.
+9.3 Testing the Go API Independently
+# Start Go server locally (for desktop development/testing)
+cd savetune-go && go run main.go
+# Test sp_dc validation
+curl -X POST http://127.0.0.1:7799/api/v1/config/spdc \
+  -H "Content-Type: application/json" \
+  -d '{"sp_dc": "YOUR_SP_DC_VALUE"}'
+# Test search
+curl "http://127.0.0.1:7799/api/v1/search?q=blinding+lights&type=track"
+SaveTune Mobile — Flutter + Go Blueprint  |  For development reference only
+No OAuth. No login. sp_dc only. Fully local.

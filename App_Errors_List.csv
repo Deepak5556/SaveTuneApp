@@ -1,0 +1,5 @@
+Type,File,Line/Position,Message
+Warning,analysis_options.yaml,10:10,The include file 'package:flutter_lints/flutter.yaml' can't be found when analyzing 'D:\Hexoran\App'.
+Warning,lib\app\router.dart,1:8,Unused import: 'package:flutter/material.dart'.
+Info/Deprecated,lib\main.dart,265:60,'withOpacity' is deprecated and shouldn't be used. Use .withValues() to avoid precision loss.
+Warning/Deprecated,android\app\src\main\java\com\hexoran\savetune_mobile\GoService.java,N/A,uses or overrides a deprecated API. (Compile with -Xlint:deprecation for details)
